@@ -1,0 +1,13 @@
+_local/**
+__pycache__/**
+test_coco/**
+
+
+
+
+
+
+
+gcp_transfer/**
+
+
