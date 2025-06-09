@@ -3,12 +3,64 @@ from dataclasses import dataclass
 import itertools
 import os
 from pathlib import Path
+import random
 from typing import Callable, Iterable, Literal, Protocol, Sequence
+from imageio import imread
 from imageio.v3 import imwrite
 import torch
 from tqdm import tqdm
 
-from cell_segmentation_training import Model, compose_proc_functions, create_scale_image_process_fn, create_split_image_process_fn, create_stack_adjacents, create_stitch_image_process_fn, get_segmentation_sequence, load_model, parallel_compose_proc_functions, parallelize_actors, prepare_image, prepare_mask, proc_type,SourceProcessor, unstack_adjacents
+from image_processing import compose_proc_functions, create_scale_image_process_fn, create_split_image_process_fn, create_stack_adjacents, create_stitch_image_process_fn, get_image_files, get_shared_names, prepare_image, prepare_mask, proc_type, SourceProcessor, unstack_adjacents
+from models import Model, ModelLoader, SegmentationSequence, TrainingSequence, load_model
+
+
+### Training Stuff
+def get_training_sequences(imfolder,maskfolder,train_percent = 0.8, batch_size:int=8):
+    sharedpaths = [(imfolder/p,maskfolder/p) for p in get_shared_names([imfolder,maskfolder])]
+    print(f"{len(sharedpaths)} shared file paths")
+    im_size = imread(sharedpaths[0][0]).shape
+    mask_size = imread(sharedpaths[0][1]).shape
+    if im_size[:2] != mask_size[:2]:
+        raise NotImplementedError(im_size,mask_size)
+
+    random.shuffle(sharedpaths)
+
+    print(f"creating training sequence with {len(sharedpaths)} (image,mask) pairs")
+    
+    train_samples = int(len(sharedpaths)*train_percent)
+    train,val = sharedpaths[:train_samples],sharedpaths[train_samples:]
+
+    train_sequence = TrainingSequence(batch_size,im_size[:2],[p[0] for p in train],[p[1] for p in train])
+    val_sequence = TrainingSequence(batch_size,im_size[:2],[p[0] for p in val],[p[1] for p in val])
+
+    return (train_sequence,val_sequence)
+
+### Segmentation Stuff
+def get_segmentation_sequence(input_folder:str|Path,*output_folders:str|Path,recurse=True,batch_size:int=32,overwrite=False):
+    ## prepare input file reading
+    files = get_image_files(input_folder,recurse=recurse)
+
+    print(f"creating segmentation sequence with {len(files)} image files")
+    #make destination folders to match input directory tree
+    parents:set[Path] = set()
+    for name in files:
+        for d in output_folders:
+            parents.add(Path(os.path.relpath(name,input_folder)).parent);
+    
+    for par in parents:
+        for d in output_folders:
+            (Path(d)/par).mkdir(parents=True,exist_ok=True);
+
+    completed_masks = [set()];
+    if not overwrite:
+        completed_masks = []
+        for d in output_folders:
+            cmasks = set([os.path.relpath(x,d) for x in get_image_files(d,recurse=recurse)]); #optimize for lookup
+            completed_masks.append(cmasks);
+
+    files = [str(fi) for fi in files if any([os.path.relpath(fi,input_folder) not in cmasks for cmasks in completed_masks])];
+
+    return SegmentationSequence(batch_size,None,files);
 
 
 @dataclass
@@ -61,6 +113,7 @@ class SegmentationParams:
 
 
 def make_process_fn(params:SegmentationParams,im_type:Literal["masks","images"],parallel=False)->proc_type:
+    from image_processing import parallelize_actors
     if parallel:
         ctx = parallelize_actors
     else:
@@ -81,7 +134,6 @@ def make_process_fn(params:SegmentationParams,im_type:Literal["masks","images"],
 
         if params.do_scaling:
             comp_fns.append(create_scale_image_process_fn(params.scale_factor))
-
 
         return compose_proc_functions(comp_fns) if not parallel else parallel_compose_proc_functions(comp_fns)
 
@@ -108,9 +160,7 @@ def make_deprocess_fn(params:SegmentationParams,im_type:Literal["masks","images"
             comp_fns.append(create_scale_image_process_fn(params.scale_factor))
 
         return compose_proc_functions(comp_fns) if not parallel else parallel_compose_proc_functions(comp_fns)
-    
-class ModelLoader(Protocol):
-    def __call__(self,modelpath:Path|str|os.PathLike[str],modeltype:str,gpu:bool=False,**kwargs)->Model: ...
+
 
 def segment_images(modelname:str,
                    im_source:str|Path,
@@ -158,6 +208,7 @@ def segment_images(modelname:str,
         print("deprocessing masks...")
         source.deprocess_segmentation_masks(deproc_fn)
     print("mask deprocessing complete. Segmentation complete")
+
 
 # for multiple models which takes images processed the same, saving some compute time
 def multisegment_images(modelnames:list[str], 
@@ -307,10 +358,6 @@ def segment_movie(cell_model:str|None,nuc_model:str|None,
                         gpu=gpu
             )
 
-
-
-if __name__ == "__main__":
-    pass
 
 
 # def segment_images_multi(models:list[str|Path],

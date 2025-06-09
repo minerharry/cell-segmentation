@@ -2,17 +2,12 @@
 from abc import ABC
 import datetime
 import random
-# import traceback
+import types
 import typing
 import zipfile
-# import fastai.torch_core
 from gsutilwrap import rsync, stat, copy
 import pandas as pd
 from warnings import warn
-import imageio
-import ray.core
-import ray.types
-import ray.util.queue
 from skimage.io import imread, imsave, imshow
 from skimage.exposure import rescale_intensity, adjust_gamma
 from skimage.transform import resize
@@ -23,32 +18,15 @@ import os
 import numpy as np
 from pathlib import Path, PurePath
 import re
-# import ntpath
 import shutil
 import stat
 import json_tricks
+from libraries import filenames
 
+from collections import OrderedDict
+from copy import deepcopy
+from pathlib import PurePosixPath
 
-import ultraimport
-try:
-    from libraries import filenames
-except ImportError:
-    warn("Libraries package not installed! Navigate to libraries repo and run `pip install -e .`")
-    filenames = ultraimport.ultraimport("../cell-tracking/libraries/filenames.py")
-    # filenames = libraries.filenames
-
-# fix for new segmentation_models error was taken from here: https://stackoverflow.com/questions/75433717/module-keras-utils-generic-utils-has-no-attribute-get-custom-objects-when-im
-os.environ["KERAS_BACKEND"] = "torch"
-os.environ["SM_FRAMEWORK"] = "keras"
-
-from keras.preprocessing.image import load_img
-import keras
-
-
-## module folder globals. SET THESE WHEN YOU USE IT!!!
-# self.temp_folder = Path(str(os.getpid()))/"temp"
-# self.temp_folder = Path(str(os.getpid()))/"meta"
-# local_modelsfolder = Path(str(os.getpid()))/"models"
 
 
 
@@ -71,10 +49,9 @@ def rmdir(dir):
 def is_gcp_path(path:PurePath):
   return path.parts[0].lower() == "gs:";
 
-if True:
-    def create_UNET():
-        from segmentation_models import Unet
-        return Unet('resnet34', encoder_weights='imagenet', classes=2, input_shape=(None,None,3), activation='softmax')
+def create_UNET():
+    from segmentation_models import Unet
+    return Unet('resnet34', encoder_weights='imagenet', classes=2, input_shape=(None,None,3), activation='softmax')
 
 def _linux_cmd_zip(source,dest,recurse=False,compresslevel:Union[int,None]=None,bar=None,relative_to = ""):
     raise NotImplemented
@@ -135,50 +112,6 @@ def _python_cmd_unzip(source,dest,overwrite=False):
 unzipExists = shutil.which("unzip")
 cmd_unzip = _linux_cmd_unzip if unzipExists else _python_cmd_unzip
 print("using python unzip" if not unzipExists else "using cmdline unzip")
-
-    # def load_keras_h5(config_path:Path,weights_path:Path):
-    #     #load model as json
-    #     with open(config_path) as json_file:
-    #         json_config = json_file.read()
-    #     loaded_model = keras.models.model_from_json(json_config)
-
-    #     # Load weights
-    #     loaded_model.load_weights(weights_path)
-
-    #     return loaded_model
-
-    # def save_model(modelname:str|Path,model,push=True):
-    #     # json_name = local_modelsfolder/modelname/('model_config.json')
-    #     # weights_name = local_modelsfolder/modelname/('weights_only.h5')
-
-    #     # # Save model config
-    #     # json_config = model.to_json()
-    #     # with open(json_name, 'w') as json_file:
-    #     #     json_file.write(json_config)
-
-    #     # # Save weights and architecture
-    #     # model.save_weights(weights_name)
-
-    #     # if push:
-    #     #     push_modelsfolder()
-
-    #     #Keras 3 saving - just use keras.saving.save_model.
-    #     import keras
-    #     keras.saving.save_model(model,f"{modelname}.keras")
-
-    #     if push:
-    #         push_modelsfolder()
-
-#### PYTORCH ####
-#idk if I'm ever gonna use this but this is where you'd implement similar functions
-if False:
-    pass
-
-
-from collections import OrderedDict
-from copy import deepcopy
-from pathlib import PurePosixPath
-
 
 class Img(NamedTuple):
     name:str
@@ -334,241 +267,6 @@ def _proc_compose(f1:proc_type,f2:proc_type)->proc_type:
 def compose_proc_functions(funcs:List[proc_type]):
   return functools.reduce(_proc_compose,funcs);
 
-from ray.types import ObjectRef
-R = TypeVar("R")
-class ObjectRefGenerator(Generic[R]):
-    """A generator to obtain object references
-    from a task in a streaming manner.
-
-    The class is compatible with generator and
-    async generator interface.
-
-    The class is not thread-safe.
-
-    Do not initialize the class and create an instance directly.
-    The instance should be created by `.remote`.
-
-    >>> gen = generator_task.remote()
-    >>> next(gen)
-    >>> await gen.__anext__()
-    """
-
-    """
-    Public APIs
-    """
-
-    def __iter__(self) -> "ObjectRefGenerator[R]": ...
-
-    def __next__(self) -> ObjectRef[R]: ...
-
-    def send(self, value): ...
-
-    def throw(self, value): ...
-
-    def close(self): ...
-
-    def __aiter__(self) -> "ObjectRefGenerator[R]": ...
-
-    async def __anext__(self): ...
-
-    async def asend(self, value): ...
-
-    async def athrow(self, value): ...
-
-    async def aclose(self): ...
-
-    def completed(self) -> ObjectRef[R]: ...
-
-    def next_ready(self) -> bool: ...
-
-    def is_finished(self) -> bool: ...
-
-
-
-
-remote_proc_type = Callable[[Img|Iterable[Img]],ObjectRef[Img|Iterable[Img]]]
-def remote_wrap(fn:proc_type,remote_kwargs={})->remote_proc_type:
-    par = ray.remote(fn,**remote_kwargs)
-    def remoted(im:Union[Img,ObjectRef[Img]])->ObjectRef[Img|Iterable[Img]]:
-        return par.remote(im)
-    setattr(remoted,"is_remoted",True)
-    return remoted
-
-
-def parallel_compose_proc_functions(funs:List[proc_type|remote_proc_type|tuple[proc_type,dict]])->proc_type:
-    """ Parallel version of compose_proc_functions. NOTE: At every branch of the function tree 
-    (each input image, functions that return multiple images) there is no guarantee that proc functions 
-    will be run in the same thread. THEREFORE, ANY STATEFUL PROCESS FUNCTIONS MUST BE MADE PROCESS-SAFE WITH RAY ACTORS 
-    (See Enumerator for an example).
-    """
-
-    raise NotImplemented
-    #OK SO, STATE OF THIS
-    #PROBLEM: EACH GENERATED TASK CAN PRODUCE A GENERATOR OF IMAGES - Looking at you, Enumerator
-
-    if not IS_PARALLEL:
-        raise ValueError("Cannot use parallel processing functions without activating a parallel context. Please use:\n" + \
-        "with parallelize_actors():\n" + \
-        "    [create process functions here]")
-    remote_funs:list[remote_proc_type] = []
-    for f in funs:
-        if isinstance(f,tuple):
-            remote_funs.append(remote_wrap(*f))
-        elif getattr(f,"is_remoted",False):
-            remote_funs.append(f) #already wrapped
-        else:
-            remote_funs.append(remote_wrap(f))
-    
-    # @ray.remote
-    # def fetch_loop(images:ObjectRef[Img],func:remote_proc_type,out:ray.util.queue.Queue):
-    #     for im in images:
-    #         out.put(func(im))
-    #     out.put(None)
-    
-    # @ray.remote
-    # def push_loop(inp:ray.util.queue.Queue):
-
-        
-        
-
-    @ray.remote
-    class RayWaIterator(Iterator[ObjectRef[Img]]):
-        def __init__(self,images:ObjectRefGenerator[Img],func:remote_proc_type):
-            self.images = images
-            self.func = func
-            self.refs = []
-            
-        def iter(self): #this seems... silly, but I think we've got it
-            yield from self
-
-        def __iter__(self):
-            return self
-
-        def __next__(self):
-            
-
-            
-            if len(self.refs) == 0:
-                raise StopIteration
-            ready:ObjectRefGenerator[Img]
-            # print([type(ref) for ref in self.refs])
-            [ready],self.refs = ray.wait(list(self.refs),fetch_local = True,num_returns=1)
-            # print(type(ready))
-            return next(ready);
-
-    def exec(im:Union[Img,Iterable[Img]]):
-        if isinstance(im,Img):
-            im = [im]
-        refs = im
-        assert len(remote_funs) > 0
-        for func in remote_funs:
-           
-           refs = func(refs)
-        return RayWaIterator(refs)
-    return exec
-
-
-
-def print_res(fn,name):
-    def f(*args,**kwargs):
-        r = fn(*args,**kwargs)
-        print(f"{name}: {r}")
-        return r
-    return f
-
-
-# ### Enumerator
-
-# In[180]:
-
-
-import ray
-import ray.actor
-from builtins import dir
-import types
-### Using ray backend instead of loky for joblib, so that we can have shared classes (actors).
-### However, ray.remote() on a class makes every function and attribute access **doubly** indirect,
-### first by adding a .remote() to actually call it and returning an ObjectRef, then when calling ray.get() on that ObjectRef
-### This is great if you want to have lots of async stuff or specify options when the task itself is completed,
-### but the goal here is solely performance with limited interaction with Ray, so usually the .remote and the .get
-### are totally useless! So this is a special wrapper that kind of un-does all the spcial methods ray adds by re-exposing them
-class WrappedActor: #insert into the instance tree to detect wrapped actors
-    pass
-@doublewrap
-def ray_remote_invisible(baseclass:type,/,attr_access=True,**kwargs):
-    """takes the same arguments as ray.remote"""
-    if issubclass(baseclass,WrappedActor):
-        raise ValueError(f"Cannot wrapped already-wrapped actor class {baseclass}!");
-    if attr_access:
-        if hasattr(baseclass,"_get_actor_attr"):
-            raise NameError(f"Name collision: cannot add actor attribute access to class {baseclass} with existing attribute _get_actor_attr.")
-        def _get_actor_attr(self,name:str):
-            # print(f"getting actor attribute: {name}")
-            return getattr(self,name)
-        baseclass._get_actor_attr = _get_actor_attr
-
-    if kwargs:
-        actor = ray.remote(**kwargs)(baseclass)
-    else:
-        actor = ray.remote(baseclass)
-
-    class ActorWrapper(baseclass,WrappedActor):
-        _actorbase = actor
-        def __init__(self,*args,**kwargs):
-            self._handle = self._actorbase.remote(*args,**kwargs)
-
-            ##since the handle methods are created at instantiation, we have to create ours at instantiation, too
-            for name in dir(self._handle):
-                try:
-                    v = getattr(self._handle,name)
-                except:
-                    continue
-                # print(name,type(v))
-                if isinstance(v,ray.actor.ActorMethod):
-                    # print("adding method:",name)
-                    ##since we are adding a method at instantiation, we have to bind it ourselves
-                    setattr(self,name,types.MethodType(unremote_method(v),self))
-            print("wrapper instantiation complete")
-
-
-        def __getstate__(self):
-            # print("Wrapper state called")
-            return self.__dict__
-
-        def __getattr__(self,name:str):
-            """will only be called for attributes of the actor class that were not copied into the base actor as ActorMethods.
-            The returned objects will be serialized copies, and not maintain their link with the original actor."""
-            # print(f"getting attribute {name} for wrapper object {self}")
-            if name == "__setstate__":
-                raise AttributeError(name)
-            if hasattr(self,"_get_actor_attr"):
-                return self._get_actor_attr(name)
-            else:
-                raise Exception("Cannot use __getattr__; actor class does not implement _get_actor_attr")
-
-    return ActorWrapper
-
-
-
-def unremote_method(method:ray.actor.ActorMethod):
-    def call(self,*args,**kwargs): #self input because method
-        # print(f"remote method {method.remote.__name__} called")
-        ref = method.remote(*args,**kwargs)
-        # raise ValueError(f"Error while calling remote method {method.__name__} with args {args,kwargs}, returned ref {ref}")
-        if isinstance(ref,ray.ObjectRefGenerator):
-            # raise ValueError(ref)
-            return (ray.get(r) for r in ref)
-        elif isinstance(ref,ray.ObjectRef):
-            return ray.get(ref)
-        else:
-            raise ValueError(f"Calling remote method {method} returned non-object-ref {ref}")
-
-    call.__name__ = method.remote.__name__
-    return call
-
-
-# In[181]:
-
 
 from typing import DefaultDict, cast
 class Enumerator: #simple in-out mapper for splitting/stitching like operations
@@ -671,15 +369,15 @@ class Enumerator: #simple in-out mapper for splitting/stitching like operations
 
 from contextlib import AbstractContextManager, contextmanager
 
-### ANY PARALLEL ACTORS GO HERE
+### ANY PARALLEL ACTOR CLASS NAMES GO HERE
 actor_classes = ["Enumerator"]
 _parallel_store = DefaultDict(type(None))
 _local_store = {}
 IS_PARALLEL = False
-# print(_parallel_store["Enumerator"])
 
 @contextmanager
 def parallelize_actors():
+    from parallel import ray_remote_invisible
     global IS_PARALLEL
     init_ray()
     try:
@@ -700,11 +398,6 @@ def parallelize_actors():
         IS_PARALLEL = False
 
 
-# ### Image/Mask Processing
-
-# #### Get Images
-
-# In[182]:
 
 
 from PIL import Image
@@ -740,10 +433,6 @@ def _get_files(p, fs, extensions=None):
     return res
 
 
-# #### Preparation
-
-# In[183]:
-
 
 @proc_fn
 def prepare_image(im:Img):
@@ -758,7 +447,7 @@ def prepare_image(im:Img):
 @proc_fn
 def prepare_mask(im:Img):
     name,mask,data = im
-    #TODO: update for combined masks
+    #TODO: update for combined/3-stacked masks
     if (len(mask.shape) == 3):
         mask = mask[:,:,0];
     mask = mask.copy()
@@ -768,29 +457,7 @@ def prepare_mask(im:Img):
     return Img(name,mask,data)
 
 
-# 
-# #### Splitting / Stitching
 
-# In[184]:
-
-
-from typing import NewType
-try:
-    raise ImportError
-    # from tensorflow import Tensor as tfTensor
-except:
-    class _tfTensor:
-        def numpy(self)->np.ndarray:
-            raise NotImplemented
-    tfTensor = _tfTensor
-try:
-    from torch import Tensor as torchTensor
-except:
-    class _torchTensor:
-        def numpy(self)->np.ndarray:
-            raise NotImplemented
-    torchTensor = _torchTensor
-    # torchTensor = NewType('torchTensor',int)
     
 def create_split_image_process_fn(x_slices,y_slices,context_bounds,crop)->proc_type:
     @proc_fn
@@ -827,14 +494,8 @@ def create_stitch_image_process_fn(x_slices,y_slices,context_bounds,crop)->proc_
     return Enumerator.create(stitch_image,enum_in=True);
 
 
-# #### Stacking
-
-# In[185]:
-
-
 import re,functools
-# regex = re.compile(r'(p[0-9]*)_s([0-9]+)_t([0-9]+).*(\.TIF|\.TIFF|\.tif|\.tiff)')
-format_regex = filenames.filename_regex_format
+format_regex = filenames.filename_regex
 default_regex = filenames.filename_regex_anybasename
 
 #fairly versatile offset function.
@@ -874,7 +535,7 @@ def create_stack_adjacents(num_stack:int,duplicate_missing:bool=False,offsets_fn
         b2.jpg
 
 
-        My parse regex could be '([a-z])(\d)\.jpg' and my format regex would be '{}{}\.jpg'. If a1 was adjacent to a2, then my idx_key would be 1.
+        My parse regex could be '([a-z])(\\d)\\.jpg' and my format regex would be '{}{}\\.jpg'. If a1 was adjacent to a2, then my idx_key would be 1.
     """
     
     if custom_regex_key is not None and (offsets_fn is None or offsets_fn is default_offsets_fn):
@@ -934,13 +595,6 @@ def unstack_adjacents(im:Img):
     raise NotImplementedError("adjacent image unstacking not implemented yet")
 
 
-
-# ### Misc Processing Functions
-# 
-
-# In[186]:
-
-
 def create_scale_image_process_fn(scale_factor:float)->proc_type:
     from skimage.util import img_as_bool
     @proc_fn
@@ -952,9 +606,6 @@ def create_scale_image_process_fn(scale_factor:float)->proc_type:
     return scale_image;
 
 
-# In[187]:
-
-
 def create_gamma_image_process_fn(gammas:List[float])->proc_type:
     @proc_fn
     def gammafy_image(obj:Img):
@@ -963,8 +614,6 @@ def create_gamma_image_process_fn(gammas:List[float])->proc_type:
     return gammafy_image;
 
 
-# In[188]:
-
 
 def create_duplicate_process_fn(num_duplicates:int)->proc_type:
     @proc_fn
@@ -972,81 +621,6 @@ def create_duplicate_process_fn(num_duplicates:int)->proc_type:
         return [obj.copy() for _ in range(num_duplicates)]
     return duplicate_image
 
-
-# ### Data Sequence, Batching, and Image Prep
-
-# In[189]:
-
-
-import math
-class TrainingSequence(keras.utils.Sequence):
-    """Helper to iterate over the data (as Numpy arrays)."""
-
-    def __init__(self, batch_size:int, img_size:tuple[int,int], input_img_paths:list[str], target_img_paths:list[str]):
-        self.batch_size = batch_size
-        self.img_size = img_size
-        self.input_img_paths = input_img_paths
-        self.target_img_paths = target_img_paths
-
-        assert len(input_img_paths) == len(target_img_paths)
-
-    def __len__(self):
-        return math.ceil(len(self.target_img_paths) / self.batch_size)
-
-
-    def __getitem__(self, idx):
-        """Returns tuple (input, target) correspond to batch #idx."""
-        if idx > len(self):
-            raise StopIteration
-        i = idx * self.batch_size
-        batch_input_img_paths = self.input_img_paths[i : i + self.batch_size]
-        batch_target_img_paths = self.target_img_paths[i : i + self.batch_size]
-        if len(batch_input_img_paths) == 0 or len(batch_target_img_paths) == 0:
-            raise StopIteration #sanity check
-        x = np.zeros((len(batch_input_img_paths),) + self.img_size + (3,), dtype="float32")
-        for j, path in enumerate(batch_input_img_paths):
-            img = load_img(path, target_size=self.img_size, color_mode='rgb')
-            x[j] = img
-        y = np.zeros((len(batch_target_img_paths),) + self.img_size + (1,), dtype="uint8")
-        for j, path in enumerate(batch_target_img_paths):
-            img = load_img(path, target_size=self.img_size, color_mode="grayscale")
-            y[j] = np.expand_dims(img, 2)
-        return x, y
-
-
-# In[190]:
-
-# from builtins import _GetItemIterable
-class SegmentationSequence(keras.utils.Sequence):
-    """Helper to iterate over the data (as Numpy arrays)."""
-    def __init__(self, batch_size:int, img_size:tuple[int,int]|None, input_img_paths:list[str]):
-        self.batch_size = batch_size
-        self.img_size = img_size
-        self.input_img_paths = input_img_paths
-
-    # def __iter__(self):
-    #     iter()
-
-    def __len__(self):
-        # print(f"input paths: {len(self.input_img_paths)}, batch size: {self.batch_size}, total length: {math.ceil(len(self.input_img_paths) / self.batch_size)}")
-        return math.ceil(len(self.input_img_paths) / self.batch_size)
-
-    def __getitem__(self, idx):
-        """Returns tuple (input, target) correspond to batch #idx."""
-        if idx > len(self):
-            raise StopIteration
-        i = idx * self.batch_size
-        batch_input_img_paths = self.input_img_paths[i : i + self.batch_size]
-        if len(batch_input_img_paths) == 0:
-            raise StopIteration #sanity check
-        if self.img_size is None:
-            ##hack
-            self.img_size = imread(batch_input_img_paths[0]).shape[:2]
-        x = np.zeros((len(batch_input_img_paths),) + self.img_size + (3,), dtype="float32")
-        for j, path in enumerate(batch_input_img_paths):
-            img = load_img(path, target_size=self.img_size, color_mode='rgb')
-            x[j] = img
-        return (x,batch_input_img_paths)
 
 from datetime import datetime
 class SourceRecord:
@@ -1113,8 +687,6 @@ class SourceRecord:
         self.file.parent.mkdir(parents=True,exist_ok=True)
         json_tricks.dump(self.data,str(self.file),indent=1)
 
-        
-            
 
 class SourceProcessor(AbstractContextManager):
     def __init__(self,
@@ -1167,6 +739,7 @@ class SourceProcessor(AbstractContextManager):
         if exc_value:
             self.log_error(exc_type,exc_value,traceback)
         elif self.clear_on_exit:
+            assert self.record is not None
             self.record.clear()
             self.clear_folders()
 
@@ -1273,7 +846,6 @@ class SourceProcessor(AbstractContextManager):
 
     def _push_gcp_files(self,in_folder:Path,out_path:PurePath,keyword:str,overwrite:bool):
         print(f"pushing gcp files from {in_folder} to {out_path}")
-    #     breakpoint()
         assert os.path.isdir(in_folder);
         if (is_gcp_path(out_path)): #first part is gs:, must be removed to work with gcloud
             out_path = PurePosixPath(*out_path.parts[1:])
@@ -1495,9 +1067,6 @@ class SourceProcessor(AbstractContextManager):
 
         return dest;
 
-
-
-
     def process_training_images(self,process_fn:proc_type=no_op,overwrite_source=False):
         return self.process_keyword("training_images",process_fn,overwrite_source=overwrite_source);
 
@@ -1523,8 +1092,6 @@ class SourceProcessor(AbstractContextManager):
         return self._push_sourcefolder("segmentation_masks")
 
 
-
-
 def get_shared_names(folders:Iterable[Path|str]):
     sharedpaths = set.intersection(*map(set,map(os.listdir,folders)))
     return sharedpaths
@@ -1532,162 +1099,8 @@ def get_shared_names(folders:Iterable[Path|str]):
 def get_shared_files(folders:Iterable[Path|str]):
     return [tuple(f/p for f in folders) for p in get_shared_names(folders)]
 
-### Training Stuff
-def get_training_sequences(imfolder,maskfolder,train_percent = 0.8, batch_size:int=8):
-    sharedpaths = [(imfolder/p,maskfolder/p) for p in get_shared_names([imfolder,maskfolder])]
-    print(f"{len(sharedpaths)} shared file paths")
-    im_size = imread(sharedpaths[0][0]).shape
-    mask_size = imread(sharedpaths[0][1]).shape
-    if im_size[:2] != mask_size[:2]:
-        raise NotImplementedError(im_size,mask_size)
-
-    random.shuffle(sharedpaths)
-
-    print(f"creating training sequence with {len(sharedpaths)} (image,mask) pairs")
-    
-    train_samples = int(len(sharedpaths)*train_percent)
-    train,val = sharedpaths[:train_samples],sharedpaths[train_samples:]
-
-    train_sequence = TrainingSequence(batch_size,im_size[:2],[p[0] for p in train],[p[1] for p in train])
-    val_sequence = TrainingSequence(batch_size,im_size[:2],[p[0] for p in val],[p[1] for p in val])
-
-    return (train_sequence,val_sequence)
-
-### Segmentation Stuff
-def get_segmentation_sequence(input_folder:str|Path,*output_folders:str|Path,recurse=True,batch_size:int=32,overwrite=False):
-    # print(input_folder)
-    # from IPython import embed; embed()
-    ## prepare input file reading
-    files = get_image_files(input_folder,recurse=recurse)
-
-    print(f"creating segmentation sequence with {len(files)} image files")
-    #make destination folders to match input directory tree
-    parents:set[Path] = set()
-    for name in files:
-        for d in output_folders:
-            parents.add(Path(os.path.relpath(name,input_folder)).parent);
-    
-    for par in parents:
-        for d in output_folders:
-            (Path(d)/par).mkdir(parents=True,exist_ok=True);
-
-    completed_masks = [set()];
-    if not overwrite:
-        completed_masks = []
-        for d in output_folders:
-            cmasks = set([os.path.relpath(x,d) for x in get_image_files(d,recurse=recurse)]); #optimize for lookup
-            completed_masks.append(cmasks);
-
-    files = [str(fi) for fi in files if any([os.path.relpath(fi,input_folder) not in cmasks for cmasks in completed_masks])];
-
-    return SegmentationSequence(batch_size,None,files);
-
-
-### Model
-
-class Model(Protocol): #very dumb and only works for segmentation
-    def predict(self,x:np.ndarray,verbose:bool=True)->torch.Tensor: ...
-
-class KerasModel(Model):
-    def __init__(self,model:keras.Model,gpu:bool):
-        self.model = model
-        self.gpu = gpu
-
-    def predict(self,x:np.ndarray,verbose:int=1)->torch.Tensor:
-        t = torch.tensor(x,device='cuda' if self.gpu else 'cpu')
-        preds = self.model(t,training=False)
-        # from IPython import embed; embed()
-        #TODO: streamed output of predict() - theoretically better to pass in the PyDataset and get some sort of iterator out of preict
-        return keras.ops.argmax(preds,-1).cpu()
-
-try:
-    from fastai.learner import load_learner,Learner
-    from fastai.data.load import DataLoader
-except ImportError:
-    class FastaiModel(Model): pass
-    class FastaiWrapper(KerasModel): pass
-else:
-    class FastaiModel(Model):
-        def __init__(self,model:Learner,gpu:bool):
-            self.model = model
-            self.gpu = gpu
-            if self.gpu:
-                self.model.dls.cuda() #set train and test dataloaders to be on the gpu
-
-        def predict(self,x:np.ndarray,verbose:bool|int=True)->torch.Tensor:
-            #this is so dumb
-            # t = torch.tensor(x,dtype=torch.uint8,device='cuda' if self.gpu else 'cpu')
-            x = x.astype('uint8')
-            
-            # preds = self.model.model(t)
-            # from IPython import embed; embed()
-            # return torch.argmax(preds,-1).cpu()
-
-            if len(x.shape) == 4:
-                bs = x.shape[0]
-            else:
-                bs = 1
-                x = [x]
-            dl = self.model.dls.test_dl(x,bs=bs,num_workers=0)
-            _,_,decoded = self.model.get_preds(dl=dl,with_decoded=True)
-            # # print(x.shape)
-            # # from IPython import embed; embed()
-            # import pdb; pdb.set_trace()
-            # # DL = DataLoader(dataset=x,bs=bs,device='cuda' if self.gpu else 'cpu')
-            # res = self.model.predict(x[0]);
-            # # from IPython import embed; embed()
-            # import pdb; pdb.set_trace()
-            return decoded.cpu()
-    
-    from keras.layers import TorchModuleWrapper
-    class FastaiWrapper(KerasModel): #you know what, let's try this instead
-        def __init__(self,model:Learner,gpu:bool):
-            # self.model = model
-            torchmodel = model.model
-            if gpu:
-                torchmodel = torchmodel.to('cuda')
-            super().__init__(TorchModuleWrapper(torchmodel),gpu)
-
-        def predict(self,x,verbose:bool|int=True):
-            s = np.moveaxis(x,-1,-3)
-            return super().predict(s)
-
-
-
-def load_model_keras(path,gpu=False,compile_args:dict[str,Any]={},**kwargs)->KerasModel:
-    model:keras.Model = keras.saving.load_model(Path(path).with_suffix(".keras"));
-    keras.backend.clear_session()
-    model.compile(**compile_args)
-    if gpu:
-        try:
-            model = model.cuda()
-        except:
-            raise Exception("Could not initialize keras model to cuda device. MAKE SURE KERAS BACKEND IS TORCH! Any keras imports BEFORE setting os.environ[\"KERAS_BACKEND\"] = \"torch\" will break the backend")
-    return KerasModel(model,gpu=gpu)
-
-def load_model_fastai_torch(path,gpu=False,**kwargs)->Model:
-    import fastai
-    def label_func(x): return None; ##dummy function to make unpickling work, never used
-    def mask_from_image(x): return None; ##dummy function to make unpickling work, never used
-    import pathlib
-    temp = pathlib.PosixPath
-    pathlib.PosixPath = pathlib.PurePosixPath
-    import __main__
-    setattr(__main__,"label_func",label_func)
-    setattr(__main__,"mask_from_image",mask_from_image)
-    try:
-        learner:Learner = load_learner(path,cpu=not gpu)
-    finally:
-        pathlib.PosixPath = temp
-    return FastaiModel(learner,gpu=gpu)
-
-def load_model(modelpath:Path|str|os.PathLike[str],modeltype:str,gpu=False,**kwargs)->Model:
-    d = {"keras":load_model_keras,"fastai":load_model_fastai_torch}
-    if modeltype not in d:
-        raise ValueError(f"Unsupported model type: {modeltype}. Please use custom model loader or use a type of either keras or fastai, the two builtin supported versions")
-    return d[modeltype](modelpath,gpu=gpu,**kwargs);
-
 
 def init_ray():
+    import ray
     if not ray.is_initialized():
         ray.init(dashboard_host="0.0.0.0") #allow external connections (e.g. over tailscale since no port-forwarding through firewall)
